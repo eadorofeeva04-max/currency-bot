@@ -1,280 +1,475 @@
 import asyncio
-import aiohttp
-import os
+import logging
 import re
-from datetime import datetime
-from bs4 import BeautifulSoup
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.state import State, StatesGroup
+from datetime import datetime, timedelta
+from xml.etree import ElementTree
+
+import aiohttp
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from flask import Flask
-import threading
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+)
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from flask import Flask, request
 
 # ========== НАСТРОЙКИ ==========
-TOKEN = os.environ.get("BOT_TOKEN") or "8696308891:AAHoPKGqjHRuPFBTI8d7sP9BvjalDPzBkqM"
-bot = Bot(token=TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+BOT_TOKEN = "ВАШ_ТОКЕН_ОТ_BOTFATHER"  # Замените на реальный токен!
+CBR_API_URL = "https://www.cbr.ru/scripts/XML_daily.asp"
 
-# Flask app for Render
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def health_check():
-    return "Bot is running!"
-
-@flask_app.route('/health')
-def health():
-    return "OK"
-
-# ========== КНОПКИ ГЛАВНОГО МЕНЮ ==========
-menu_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="📊 Рассчитать курсовую разницу")]],
-    resize_keyboard=True
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
+logger = logging.getLogger(__name__)
 
-# ========== СОСТОЯНИЯ ДЛЯ FSM ==========
-class CurrencyStates(StatesGroup):
-    waiting_for_date1 = State()
-    waiting_for_date2 = State()
+# ========== КОНСТАНТЫ ==========
+HELP_TEXT = """
+🏦 <b>Калькулятор курсовой разницы USD/RUB</b>
 
-# ========== ФУНКЦИЯ ПАРСИНГА КУРСА ЦБ РФ ==========
-async def get_cbr_rate(date: str):
+Бот рассчитывает изменение курса доллара США к рублю между двумя датами на основе официальных данных ЦБ РФ.
+
+📌 <b>Как пользоваться:</b>
+1. Нажмите кнопку «📊 Рассчитать курсовую разницу»
+2. Введите дату поставки (формат: 01.03.2026 или «сегодня»)
+3. Введите дату оплаты (тот же формат)
+4. Получите результат: абсолютную и процентную разницу
+
+⚠️ <b>Важно:</b>
+• Доступны даты с 1998 года по сегодня
+• Используйте формат ДЕНЬ.МЕСЯЦ.ГОД (например: 15.08.2024)
+• Бот не хранит историю ваших расчётов
+"""
+
+# ========== FSM СОСТОЯНИЯ ==========
+class CurrencyCalc(StatesGroup):
+    waiting_for_first_date = State()   # Ждём дату поставки
+    waiting_for_second_date = State()  # Ждём дату оплаты
+
+
+# ========== КЛАВИАТУРЫ ==========
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    """Главная клавиатура с кнопкой расчёта"""
+    builder = ReplyKeyboardBuilder()
+    builder.add(KeyboardButton(text="📊 Рассчитать курсовую разницу"))
+    builder.adjust(1)
+    return builder.as_markup(resize_keyboard=True)
+
+
+def get_back_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура с кнопкой отмены"""
+    builder = ReplyKeyboardBuilder()
+    builder.add(KeyboardButton(text="🔙 Отмена"))
+    return builder.as_markup(resize_keyboard=True)
+
+
+# ========== ФУНКЦИИ РАБОТЫ С КУРСОМ ==========
+async def fetch_usd_rate(date: datetime) -> dict | None:
+    """
+    Получает курс USD на указанную дату с API ЦБ РФ.
+    Возвращает dict: {'rate': float, 'date_str': str} или None при ошибке.
+    """
+    # Форматируем дату для API ЦБ: день/месяц/год
+    date_str = date.strftime("%d/%m/%Y")
+    url = f"{CBR_API_URL}?date_req={date_str}"
+
     try:
-        day, month, year = date.split('.')
-        url_date = f"{day}/{month}/{year}"
-        url = f"https://www.cbr.ru/scripts/XML_daily.asp?date_req={url_date}"
-        
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                text = await response.text()
-                soup = BeautifulSoup(text, 'xml')
-                valute = soup.find('Valute', {'ID': 'R01235'})
-                if valute:
-                    value = valute.find('Value').text.replace(',', '.')
-                    return float(value)
-                return None
-    except Exception as e:
-        print(f"Ошибка парсинга ЦБ: {e}")
-        return None
-
-# ========== ФУНКЦИЯ ПАРСИНГА КУРСА RAPIRA ==========
-async def get_rapira_rate():
-    try:
-        url = "https://rapira.io/ru/exchange/USDT/RUB"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                text = await response.text()
-                soup = BeautifulSoup(text, 'html.parser')
-                # Пробуем разные селекторы
-                rate_element = soup.find('div', class_='exchange-rate')
-                if not rate_element:
-                    rate_element = soup.find('span', class_='rate-value')
-                if not rate_element:
-                    # Ищем любую цифру с курсом
-                    all_text = text.replace(',', '.')
-                    numbers = re.findall(r'\d+\.?\d*', all_text)
-                    for num in numbers:
-                        num_float = float(num)
-                        if 80 <= num_float <= 120:  # диапазон курса USDT/RUB
-                            return num_float
+            async with session.get(url, timeout=10) as response:
+                if response.status != 200:
+                    logger.error(f"HTTP ошибка {response.status} для даты {date_str}")
                     return None
-                
-                rate_text = rate_element.text.strip()
-                numbers = re.findall(r'\d+[\.,]?\d*', rate_text)
-                if numbers:
-                    rate = float(numbers[0].replace(',', '.'))
-                    if 80 <= rate <= 120:
-                        return rate
+
+                xml_text = await response.text()
+                root = ElementTree.fromstring(xml_text)
+
+                # Ищем элемент Valute с ID="R01235" (USD)
+                for valute in root.findall(".//Valute"):
+                    if valute.get("ID") == "R01235":
+                        value = valute.find("Value").text
+                        # Заменяем запятую на точку для преобразования в float
+                        rate = float(value.replace(",", "."))
+                        return {
+                            "rate": rate,
+                            "date_str": date.strftime("%d.%m.%Y")
+                        }
+
+                logger.warning(f"USD не найден в XML для даты {date_str}")
                 return None
-    except Exception as e:
-        print(f"Ошибка парсинга Rapira: {e}")
+
+    except aiohttp.ClientError as e:
+        logger.error(f"Ошибка сети для даты {date_str}: {e}")
+        return None
+    except (ElementTree.ParseError, ValueError, AttributeError) as e:
+        logger.error(f"Ошибка парсинга XML для даты {date_str}: {e}")
         return None
 
-# ========== ФУНКЦИЯ РАСЧЕТА ==========
-def calculate_difference(old_rate, new_rate):
-    difference = new_rate - old_rate
-    percent_change = (difference / old_rate) * 100 if old_rate != 0 else 0
-    return difference, percent_change
 
-# ========== ОБРАБОТЧИКИ ==========
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    await message.answer(
-        "💰 <b>Калькулятор курсовой разницы</b>\n\n"
-        "Я помогаю рассчитать, как изменился курс доллара (или USDT) "
-        "между датой <b>поставки</b> и датой <b>оплаты</b>.\n\n"
-        "Просто нажми кнопку ниже и введи две даты.",
-        parse_mode="HTML",
-        reply_markup=menu_kb
-    )
+async def get_reserve_rate() -> dict | None:
+    """
+    Резервный источник курса USDT/RUB с Rapira.io.
+    Используется только если ЦБ РФ недоступен.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.rapira.io/v1/rates/USDTRUB",
+                timeout=5
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    rate = float(data.get("rate", 0))
+                    if rate > 0:
+                        return {
+                            "rate": rate,
+                            "source": "Rapira.io (USDT/RUB)"
+                        }
+    except Exception as e:
+        logger.error(f"Ошибка получения резервного курса: {e}")
+    return None
 
-@dp.message(lambda message: message.text == "📊 Рассчитать курсовую разницу")
-async def start_calculation(message: Message, state: FSMContext):
-    await state.set_state(CurrencyStates.waiting_for_date1)
-    await message.answer(
-        "📅 <b>Введите ДАТУ 1 (поставка)</b>\n\n"
-        "Формат: <code>дд.мм.гггг</code>\n"
-        "Пример: <code>25.05.2026</code>\n\n"
-        "Или отправьте <b>сегодня</b> для текущей даты.",
-        parse_mode="HTML"
-    )
 
-@dp.message(CurrencyStates.waiting_for_date1)
-async def process_date1(message: Message, state: FSMContext):
-    date_input = message.text.strip().lower()
-    
-    if date_input == "сегодня":
-        date_input = datetime.now().strftime("%d.%m.%Y")
-    
-    # Проверка формата
-    date_parts = date_input.split('.')
-    if len(date_parts) != 3:
-        await message.answer("❌ Неверный формат! Используйте <code>дд.мм.гггг</code> (например: 25.05.2026)", parse_mode="HTML")
-        return
-    
-    day, month, year = date_parts
-    if len(day) != 2 or len(month) != 2 or len(year) != 4 or not all(p.isdigit() for p in [day, month, year]):
-        await message.answer("❌ Неверный формат! Используйте <code>дд.мм.гггг</code> (например: 25.05.2026)", parse_mode="HTML")
-        return
-    
-    await message.answer("🔄 Получаю курс с сайта ЦБ РФ...")
-    cbr_rate = await get_cbr_rate(date_input)
-    
-    if cbr_rate is None:
-        await message.answer("⚠️ Не удалось получить курс с ЦБ РФ. Проверьте дату или попробуйте позже.")
-        return
-    
-    await state.update_data(date1=date_input, cbr_rate1=cbr_rate)
-    
-    await message.answer("🔄 Получаю текущий курс Rapira...")
-    rapira_rate = await get_rapira_rate()
-    
-    if rapira_rate:
-        await state.update_data(rapira_rate1=rapira_rate)
-        await message.answer(
-            f"📌 <b>Дата 1 (Поставка):</b> {date_input}\n"
-            f"🏦 <b>Курс ЦБ РФ:</b> 1$ = {cbr_rate:.2f} ₽\n"
-            f"🪙 <b>Курс Rapira (USDT):</b> 1 USDT ≈ {rapira_rate:.2f} ₽\n\n"
-            f"📅 Теперь введите <b>ДАТУ 2 (оплата)</b> в том же формате:",
-            parse_mode="HTML"
-        )
+def parse_date(user_input: str) -> datetime | None:
+    """
+    Парсит дату из строки формата ДД.ММ.ГГГГ или слово "сегодня".
+    Возвращает datetime или None при ошибке.
+    """
+    if user_input.lower() in ["сегодня", "today"]:
+        return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Проверяем формат дд.мм.гггг
+    pattern = r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$"
+    match = re.match(pattern, user_input.strip())
+
+    if not match:
+        return None
+
+    day, month, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+    # Базовая валидация
+    if year < 1992 or year > datetime.now().year + 1:
+        return None
+    if month < 1 or month > 12:
+        return None
+    if day < 1 or day > 31:
+        return None
+
+    try:
+        return datetime(year, month, day)
+    except ValueError:
+        return None
+
+
+def format_result(rate1: float, date1_str: str, rate2: float, date2_str: str) -> str:
+    """Форматирует результат расчёта в красивое сообщение"""
+    diff_abs = rate2 - rate1
+    diff_percent = (diff_abs / rate1) * 100 if rate1 != 0 else 0
+    sign = "+" if diff_abs >= 0 else ""
+
+    # Интерпретация
+    if diff_abs > 0:
+        interpretation = "📈 <b>Курс вырос</b> → стоимость закупки увеличилась"
+    elif diff_abs < 0:
+        interpretation = "📉 <b>Курс упал</b> → вы получили прибыль на разнице"
     else:
-        await state.update_data(rapira_rate1=None)
-        await message.answer(
-            f"📌 <b>Дата 1 (Поставка):</b> {date_input}\n"
-            f"🏦 <b>Курс ЦБ РФ:</b> 1$ = {cbr_rate:.2f} ₽\n"
-            f"⚠️ Курс Rapira временно недоступен\n\n"
-            f"📅 Теперь введите <b>ДАТУ 2 (оплата)</b>:",
-            parse_mode="HTML"
-        )
-    
-    await state.set_state(CurrencyStates.waiting_for_date2)
+        interpretation = "⚖️ <b>Курс не изменился</b>"
 
-@dp.message(CurrencyStates.waiting_for_date2)
-async def process_date2(message: Message, state: FSMContext):
-    date_input = message.text.strip().lower()
-    
-    if date_input == "сегодня":
-        date_input = datetime.now().strftime("%d.%m.%Y")
-    
-    # Проверка формата
-    date_parts = date_input.split('.')
-    if len(date_parts) != 3:
-        await message.answer("❌ Неверный формат! Используйте <code>дд.мм.гггг</code> (например: 25.05.2026)", parse_mode="HTML")
+    result_text = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 <b>РЕЗУЛЬТАТ РАСЧЕТА</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📅 <b>Дата 1 (Поставка):</b> {date1_str}
+   💵 1$ = {rate1:.2f} ₽
+
+📅 <b>Дата 2 (Оплата):</b> {date2_str}
+   💵 1$ = {rate2:.2f} ₽
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📈 <b>ИЗМЕНЕНИЕ:</b>
+💰 <b>Разница:</b> {sign}{diff_abs:.2f} ₽
+📊 <b>% изменения:</b> {sign}{diff_percent:.2f}%
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 {interpretation}
+
+🔄 Нажмите кнопку меню для нового расчёта
+"""
+    return result_text.strip()
+
+
+# ========== ОБРАБОТЧИКИ БОТА ==========
+async def safe_send_message(
+    message: types.Message,
+    text: str,
+    reply_markup=None,
+    parse_mode="HTML"
+):
+    """Безопасная отправка сообщения с обработкой ошибок"""
+    try:
+        await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as e:
+        logger.error(f"Ошибка отправки сообщения: {e}")
+        await message.answer(text, reply_markup=reply_markup)
+
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    """Обработчик команды /start"""
+    await state.clear()
+    await safe_send_message(
+        message,
+        f"👋 <b>Добро пожаловать!</b>\n\n{HELP_TEXT}",
+        reply_markup=get_main_keyboard()
+    )
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    """Обработчик команды /help"""
+    await safe_send_message(message, HELP_TEXT, reply_markup=get_main_keyboard())
+
+
+@dp.message(F.text == "📊 Рассчитать курсовую разницу")
+async def start_calculation(message: types.Message, state: FSMContext):
+    """Запуск сценария расчёта"""
+    await state.clear()
+    await state.set_state(CurrencyCalc.waiting_for_first_date)
+    await safe_send_message(
+        message,
+        "📅 Введите <b>дату поставки</b> в формате <code>дд.мм.гггг</code>\n"
+        "или напишите <b>«сегодня»</b>:\n\n"
+        "<i>Например: 15.03.2026 или сегодня</i>",
+        reply_markup=get_back_keyboard()
+    )
+
+
+@dp.message(F.text == "🔙 Отмена", StateFilter(CurrencyCalc))
+async def cancel_calculation(message: types.Message, state: FSMContext):
+    """Отмена текущего расчёта"""
+    await state.clear()
+    await safe_send_message(
+        message,
+        "❌ Расчёт отменён.\n\nНажмите «📊 Рассчитать курсовую разницу», чтобы начать заново.",
+        reply_markup=get_main_keyboard()
+    )
+
+
+@dp.message(CurrencyCalc.waiting_for_first_date)
+async def process_first_date(message: types.Message, state: FSMContext):
+    """Обработка первой даты (поставка)"""
+    user_input = message.text.strip()
+
+    # Проверяем, не хочет ли пользователь отменить
+    if user_input == "🔙 Отмена":
+        await cancel_calculation(message, state)
         return
-    
-    day, month, year = date_parts
-    if len(day) != 2 or len(month) != 2 or len(year) != 4 or not all(p.isdigit() for p in [day, month, year]):
-        await message.answer("❌ Неверный формат! Используйте <code>дд.мм.гггг</code> (например: 25.05.2026)", parse_mode="HTML")
+
+    # Парсим дату
+    first_date = parse_date(user_input)
+    if first_date is None:
+        await safe_send_message(
+            message,
+            "❌ <b>Неверный формат!</b>\n\n"
+            "Используйте формат <code>дд.мм.гггг</code>\n"
+            "или напишите <b>«сегодня»</b>.\n\n"
+            "<i>Пример: 01.03.2026</i>",
+            reply_markup=get_back_keyboard()
+        )
         return
-    
+
+    # Проверяем, что дата не в будущем (более чем на 1 день)
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    if first_date > today + timedelta(days=1):
+        await safe_send_message(
+            message,
+            "⚠️ <b>Дата не может быть в будущем!</b>\n\n"
+            "Введите корректную дату или «сегодня».",
+            reply_markup=get_back_keyboard()
+        )
+        return
+
+    # Отправляем статус "печатает"
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    # Получаем курс
+    await safe_send_message(message, "🔄 <i>Получаю курс с ЦБ РФ...</i>")
+    rate_data = await fetch_usd_rate(first_date)
+
+    if rate_data is None:
+        # Пробуем резервный источник
+        reserve = await get_reserve_rate()
+        if reserve:
+            await safe_send_message(
+                message,
+                f"⚠️ <b>Официальный курс ЦБ не найден.</b>\n"
+                f"💰 <b>Актуальный резервный курс (USDT/RUB):</b> 1$ ≈ {reserve['rate']:.2f} ₽\n\n"
+                f"<i>Источник: {reserve['source']}</i>\n\n"
+                f"Для расчёта по точным датам проверьте правильность ввода.",
+                reply_markup=get_main_keyboard()
+            )
+            await state.clear()
+            return
+        else:
+            await safe_send_message(
+                message,
+                "⚠️ <b>Не удалось получить курс</b> для указанной даты.\n\n"
+                "Возможные причины:\n"
+                "• Дата слишком старая (до 1998 года)\n"
+                "• Нерабочий день (курс не публиковался)\n"
+                "• Проблемы с API ЦБ\n\n"
+                "Попробуйте ввести другую дату или нажмите «Отмена».",
+                reply_markup=get_back_keyboard()
+            )
+            return
+
+    # Сохраняем данные первой даты
+    await state.update_data(
+        first_rate=rate_data["rate"],
+        first_date_str=rate_data["date_str"]
+    )
+    await state.set_state(CurrencyCalc.waiting_for_second_date)
+
+    await safe_send_message(
+        message,
+        f"✅ <b>Курс на {rate_data['date_str']}:</b> 1$ = {rate_data['rate']:.2f} ₽\n\n"
+        f"📅 Теперь введите <b>дату оплаты</b> в формате <code>дд.мм.гггг</code>\n"
+        f"или напишите <b>«сегодня»</b>:",
+        reply_markup=get_back_keyboard()
+    )
+
+
+@dp.message(CurrencyCalc.waiting_for_second_date)
+async def process_second_date(message: types.Message, state: FSMContext):
+    """Обработка второй даты (оплата)"""
+    user_input = message.text.strip()
+
+    if user_input == "🔙 Отмена":
+        await cancel_calculation(message, state)
+        return
+
+    # Парсим дату
+    second_date = parse_date(user_input)
+    if second_date is None:
+        await safe_send_message(
+            message,
+            "❌ <b>Неверный формат!</b>\n\n"
+            "Используйте формат <code>дд.мм.гггг</code>\n"
+            "или напишите <b>«сегодня»</b>.",
+            reply_markup=get_back_keyboard()
+        )
+        return
+
+    # Проверяем, что дата не в будущем
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    if second_date > today + timedelta(days=1):
+        await safe_send_message(
+            message,
+            "⚠️ <b>Дата не может быть в будущем!</b>",
+            reply_markup=get_back_keyboard()
+        )
+        return
+
+    # Получаем данные первой даты из состояния
     data = await state.get_data()
-    date1 = data.get('date1')
-    cbr_rate1 = data.get('cbr_rate1')
-    
-    if not cbr_rate1:
-        await message.answer("⚠️ Ошибка: не найдены данные первой даты. Начните заново.", reply_markup=menu_kb)
+    if not data:
+        await safe_send_message(
+            message,
+            "❌ <b>Ошибка:</b> данные первой даты утеряны.\n"
+            "Начните расчёт заново.",
+            reply_markup=get_main_keyboard()
+        )
         await state.clear()
         return
-    
-    await message.answer("🔄 Получаю курс с сайта ЦБ РФ...")
-    cbr_rate2 = await get_cbr_rate(date_input)
-    
-    if cbr_rate2 is None:
-        await message.answer("⚠️ Не удалось получить курс с ЦБ РФ. Проверьте дату или попробуйте позже.")
+
+    first_rate = data["first_rate"]
+    first_date_str = data["first_date_str"]
+
+    # Отправляем статус
+    await message.bot.send_chat_action(message.chat.id, "typing")
+    await safe_send_message(message, "🔄 <i>Получаю курс с ЦБ РФ...</i>")
+
+    # Получаем курс для второй даты
+    rate_data = await fetch_usd_rate(second_date)
+
+    if rate_data is None:
+        await safe_send_message(
+            message,
+            f"⚠️ <b>Не удалось получить курс</b> для даты {second_date.strftime('%d.%m.%Y')}.\n\n"
+            f"Курс на дату поставки: 1$ = {first_rate:.2f} ₽\n\n"
+            f"Попробуйте ввести другую дату или нажмите «Отмена».",
+            reply_markup=get_back_keyboard()
+        )
         return
-    
-    diff, percent = calculate_difference(cbr_rate1, cbr_rate2)
-    diff_sign = "+" if diff >= 0 else ""
-    percent_sign = "+" if percent >= 0 else ""
-    
-    result_text = (
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>РЕЗУЛЬТАТ РАСЧЕТА (ЦБ РФ)</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📅 <b>Дата 1 (Поставка):</b> {date1}\n"
-        f"   Курс: 1$ = {cbr_rate1:.2f} ₽\n\n"
-        f"📅 <b>Дата 2 (Оплата):</b> {date_input}\n"
-        f"   Курс: 1$ = {cbr_rate2:.2f} ₽\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 <b>ИЗМЕНЕНИЕ:</b>\n"
-        f"💰 Разница: {diff_sign}{diff:.2f} ₽\n"
-        f"📊 % изменения: {percent_sign}{percent:.2f}%\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    )
-    
-    rapira_rate1 = data.get('rapira_rate1')
-    if rapira_rate1:
-        await message.answer("🔄 Получаю актуальный курс Rapira...")
-        rapira_rate2 = await get_rapira_rate()
-        if rapira_rate2:
-            diff_r, percent_r = calculate_difference(rapira_rate1, rapira_rate2)
-            diff_sign_r = "+" if diff_r >= 0 else ""
-            percent_sign_r = "+" if percent_r >= 0 else ""
-            result_text += (
-                f"\n🪙 <b>Rapira (USDT/RUB):</b>\n"
-                f"   Старый: 1 USDT = {rapira_rate1:.2f} ₽\n"
-                f"   Новый:  1 USDT = {rapira_rate2:.2f} ₽\n"
-                f"   Разница: {diff_sign_r}{diff_r:.2f} ₽\n"
-                f"   % изменения: {percent_sign_r}{percent_r:.2f}%\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            )
-    
-    result_text += (
-        f"\n💡 <i>Если курс вырос (+%), ваша закупочная стоимость увеличилась.\n"
-        f"Если курс упал (-%), вы получили прибыль на разнице.</i>\n\n"
-        f"🔄 Нажмите кнопку меню для нового расчета."
-    )
-    
-    await message.answer(result_text, parse_mode="HTML", reply_markup=menu_kb)
+
+    second_rate = rate_data["rate"]
+    second_date_str = rate_data["date_str"]
+
+    # Формируем и отправляем результат
+    result_text = format_result(first_rate, first_date_str, second_rate, second_date_str)
+    await safe_send_message(message, result_text, reply_markup=get_main_keyboard())
+
+    # Очищаем состояние
     await state.clear()
 
-# ========== ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА ==========
-async def main():
-    """Запуск бота (правильный для aiogram 3.x)"""
-    await dp.start_polling(bot)
 
-def run_bot_in_thread():
-    """Запуск бота в отдельном потоке с правильным event loop"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(main())
+@dp.message()
+async def handle_unknown(message: types.Message):
+    """Обработка неизвестных сообщений"""
+    await safe_send_message(
+        message,
+        "❓ <b>Неизвестная команда</b>\n\n"
+        "Нажмите «📊 Рассчитать курсовую разницу» для начала расчёта\n"
+        "или отправьте /help для справки.",
+        reply_markup=get_main_keyboard()
+    )
+
+
+# ========== FLASK ДЛЯ HEALTH CHECK НА RENDER ==========
+flask_app = Flask(__name__)
+
+
+@flask_app.route("/", methods=["GET"])
+def health_check():
+    """Health check эндпоинт для Render"""
+    return "OK", 200
+
 
 def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    """Запуск Flask-сервера для health check"""
+    flask_app.run(host="0.0.0.0", port=8080)
+
+
+# ========== ЗАПУСК БОТА ==========
+async def main():
+    """Главная асинхронная функция"""
+    # Создаём бота и диспетчер
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
+
+    # Регистрируем все хендлеры
+    dp.message.register(cmd_start, Command("start"))
+    dp.message.register(cmd_help, Command("help"))
+    dp.message.register(start_calculation, F.text == "📊 Рассчитать курсовую разницу")
+    dp.message.register(cancel_calculation, F.text == "🔙 Отмена", StateFilter(CurrencyCalc))
+    dp.message.register(process_first_date, CurrencyCalc.waiting_for_first_date)
+    dp.message.register(process_second_date, CurrencyCalc.waiting_for_second_date)
+    dp.message.register(handle_unknown)
+
+    # Запускаем polling
+    await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
-    print("🚀 Запуск бота...")
-    
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
-    bot_thread.start()
-    
-    print("🌐 Запуск Flask сервера...")
-    # Запускаем Flask в основном потоке
-    run_flask()
+    # Запускаем Flask в отдельном потоке для health check
+    import threading
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    # Запускаем бота
+    asyncio.run(main())
