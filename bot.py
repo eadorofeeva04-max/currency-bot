@@ -1,6 +1,8 @@
 import asyncio
 import aiohttp
 import os
+import re
+from datetime import datetime
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -16,7 +18,7 @@ TOKEN = "8696308891:AAHoPKGqjHRuPFBTI8d7sP9BvjalDPzBkqM"
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Flask app for Render (чтобы сервер не засыпал)
+# Flask app for Render
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -62,18 +64,30 @@ async def get_cbr_rate(date: str):
 async def get_rapira_rate():
     try:
         url = "https://rapira.io/ru/exchange/USDT/RUB"
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as response:
                 text = await response.text()
                 soup = BeautifulSoup(text, 'html.parser')
+                # Пробуем разные селекторы
                 rate_element = soup.find('div', class_='exchange-rate')
-                if rate_element:
-                    rate_text = rate_element.text.strip()
-                    import re
-                    numbers = re.findall(r'\d+[\.,]?\d*', rate_text)
-                    if numbers:
-                        rate = float(numbers[0].replace(',', '.'))
+                if not rate_element:
+                    rate_element = soup.find('span', class_='rate-value')
+                if not rate_element:
+                    # Ищем любую цифру с курсом
+                    all_text = text.replace(',', '.')
+                    numbers = re.findall(r'\d+\.?\d*', all_text)
+                    for num in numbers:
+                        num_float = float(num)
+                        if 80 <= num_float <= 120:  # диапазон курса USDT/RUB
+                            return num_float
+                    return None
+                
+                rate_text = rate_element.text.strip()
+                numbers = re.findall(r'\d+[\.,]?\d*', rate_text)
+                if numbers:
+                    rate = float(numbers[0].replace(',', '.'))
+                    if 80 <= rate <= 120:
                         return rate
                 return None
     except Exception as e:
@@ -83,7 +97,7 @@ async def get_rapira_rate():
 # ========== ФУНКЦИЯ РАСЧЕТА ==========
 def calculate_difference(old_rate, new_rate):
     difference = new_rate - old_rate
-    percent_change = (difference / old_rate) * 100
+    percent_change = (difference / old_rate) * 100 if old_rate != 0 else 0
     return difference, percent_change
 
 # ========== ОБРАБОТЧИКИ ==========
@@ -114,14 +128,16 @@ async def process_date1(message: Message, state: FSMContext):
     date_input = message.text.strip().lower()
     
     if date_input == "сегодня":
-        from datetime import datetime
         date_input = datetime.now().strftime("%d.%m.%Y")
     
-    try:
-        day, month, year = date_input.split('.')
-        if len(day) != 2 or len(month) != 2 or len(year) != 4:
-            raise ValueError
-    except:
+    # Проверка формата
+    date_parts = date_input.split('.')
+    if len(date_parts) != 3:
+        await message.answer("❌ Неверный формат! Используйте <code>дд.мм.гггг</code> (например: 25.05.2026)", parse_mode="HTML")
+        return
+    
+    day, month, year = date_parts
+    if len(day) != 2 or len(month) != 2 or len(year) != 4 or not all(p.isdigit() for p in [day, month, year]):
         await message.answer("❌ Неверный формат! Используйте <code>дд.мм.гггг</code> (например: 25.05.2026)", parse_mode="HTML")
         return
     
@@ -163,20 +179,27 @@ async def process_date2(message: Message, state: FSMContext):
     date_input = message.text.strip().lower()
     
     if date_input == "сегодня":
-        from datetime import datetime
         date_input = datetime.now().strftime("%d.%m.%Y")
     
-    try:
-        day, month, year = date_input.split('.')
-        if len(day) != 2 or len(month) != 2 or len(year) != 4:
-            raise ValueError
-    except:
+    # Проверка формата
+    date_parts = date_input.split('.')
+    if len(date_parts) != 3:
+        await message.answer("❌ Неверный формат! Используйте <code>дд.мм.гггг</code> (например: 25.05.2026)", parse_mode="HTML")
+        return
+    
+    day, month, year = date_parts
+    if len(day) != 2 or len(month) != 2 or len(year) != 4 or not all(p.isdigit() for p in [day, month, year]):
         await message.answer("❌ Неверный формат! Используйте <code>дд.мм.гггг</code> (например: 25.05.2026)", parse_mode="HTML")
         return
     
     data = await state.get_data()
     date1 = data.get('date1')
     cbr_rate1 = data.get('cbr_rate1')
+    
+    if not cbr_rate1:
+        await message.answer("⚠️ Ошибка: не найдены данные первой даты. Начните заново.", reply_markup=menu_kb)
+        await state.clear()
+        return
     
     await message.answer("🔄 Получаю курс с сайта ЦБ РФ...")
     cbr_rate2 = await get_cbr_rate(date_input)
@@ -201,28 +224,28 @@ async def process_date2(message: Message, state: FSMContext):
         f"📈 <b>ИЗМЕНЕНИЕ:</b>\n"
         f"💰 Разница: {diff_sign}{diff:.2f} ₽\n"
         f"📊 % изменения: {percent_sign}{percent:.2f}%\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     )
     
     rapira_rate1 = data.get('rapira_rate1')
     if rapira_rate1:
+        await message.answer("🔄 Получаю актуальный курс Rapira...")
         rapira_rate2 = await get_rapira_rate()
         if rapira_rate2:
             diff_r, percent_r = calculate_difference(rapira_rate1, rapira_rate2)
             diff_sign_r = "+" if diff_r >= 0 else ""
             percent_sign_r = "+" if percent_r >= 0 else ""
-            
             result_text += (
-                f"🪙 <b>Rapira (USDT/RUB):</b>\n"
+                f"\n🪙 <b>Rapira (USDT/RUB):</b>\n"
                 f"   Старый: 1 USDT = {rapira_rate1:.2f} ₽\n"
                 f"   Новый:  1 USDT = {rapira_rate2:.2f} ₽\n"
                 f"   Разница: {diff_sign_r}{diff_r:.2f} ₽\n"
                 f"   % изменения: {percent_sign_r}{percent_r:.2f}%\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             )
     
     result_text += (
-        f"💡 <i>Если курс вырос (+%), ваша закупочная стоимость увеличилась.\n"
+        f"\n💡 <i>Если курс вырос (+%), ваша закупочная стоимость увеличилась.\n"
         f"Если курс упал (-%), вы получили прибыль на разнице.</i>\n\n"
         f"🔄 Нажмите кнопку меню для нового расчета."
     )
@@ -230,18 +253,28 @@ async def process_date2(message: Message, state: FSMContext):
     await message.answer(result_text, parse_mode="HTML", reply_markup=menu_kb)
     await state.clear()
 
-# ========== ЗАПУСК БОТА В ПОТОКЕ + FLASK ДЛЯ RENDER ==========
-def run_bot():
-    asyncio.run(dp.start_polling(bot))
+# ========== ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА ==========
+async def main():
+    """Запуск бота (правильный для aiogram 3.x)"""
+    await dp.start_polling(bot)
+
+def run_bot_in_thread():
+    """Запуск бота в отдельном потоке с правильным event loop"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(main())
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
-    flask_app.run(host="0.0.0.0", port=port)
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
+    print("🚀 Запуск бота...")
+    
     # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot)
+    bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
     bot_thread.start()
     
-    # Запускаем Flask сервер (для Render)
+    print("🌐 Запуск Flask сервера...")
+    # Запускаем Flask в основном потоке
     run_flask()
