@@ -18,7 +18,10 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from flask import Flask, request
 
 # ========== НАСТРОЙКИ ==========
-BOT_TOKEN = "ВАШ_ТОКЕН_ОТ_BOTFATHER"  # Замените на реальный токен!
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN не задан! Установите переменную окружения BOT_TOKEN")
+
 CBR_API_URL = "https://www.cbr.ru/scripts/XML_daily.asp"
 
 # Настройка логирования
