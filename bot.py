@@ -14,7 +14,7 @@ from flask import Flask
 import threading
 
 # ========== НАСТРОЙКИ ==========
-TOKEN = "8696308891:AAHoPKGqjHRuPFBTI8d7sP9BvjalDPzBkqM"
+TOKEN = os.environ.get("BOT_TOKEN") or "8696308891:AAHoPKGqjHRuPFBTI8d7sP9BvjalDPzBkqM"
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
