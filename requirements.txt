@@ -1,5 +1,3 @@
-aiogram
-aiohttp
-beautifulsoup4
-flask
-pydantic<2.9
+aiogram==3.13.1
+aiohttp==3.11.11
+flask==3.1.0
