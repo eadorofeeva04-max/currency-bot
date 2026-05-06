@@ -51,7 +51,6 @@ HELP_TEXT = """
 4. Получите результат
 
 ⚠️ <b>Важно:</b>
-• Доступны даты с 1998 года
 • Формат: ДЕНЬ.МЕСЯЦ.ГОД (например: 15.08.2024)
 """
 
@@ -138,16 +137,14 @@ def format_result(rate1: float, date1_str: str, rate2: float, date2_str: str) ->
     sign = "+" if diff_abs >= 0 else ""
 
     if diff_abs > 0:
-        interpretation = "📈 <b>Курс вырос</b> → стоимость закупки увеличилась"
+        interpretation = "<b>Курс вырос</b>"
     elif diff_abs < 0:
-        interpretation = "📉 <b>Курс упал</b> → вы получили прибыль на разнице"
+        interpretation = "<b>Курс упал</b>"
     else:
-        interpretation = "⚖️ <b>Курс не изменился</b>"
+        interpretation = "<b>Курс не изменился</b>"
 
     result_text = f"""
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 <b>РЕЗУЛЬТАТ РАСЧЕТА</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>РЕЗУЛЬТАТ РАСЧЕТА</b>
 
 📅 <b>Дата 1 (Поставка):</b> {date1_str}
    💵 1$ = {rate1:.2f} ₽
@@ -155,11 +152,9 @@ def format_result(rate1: float, date1_str: str, rate2: float, date2_str: str) ->
 📅 <b>Дата 2 (Оплата):</b> {date2_str}
    💵 1$ = {rate2:.2f} ₽
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📈 <b>ИЗМЕНЕНИЕ:</b>
-💰 <b>Разница:</b> {sign}{diff_abs:.2f} ₽
-📊 <b>% изменения:</b> {sign}{diff_percent:.2f}%
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>ИЗМЕНЕНИЕ:</b>
+<b>Разница:</b> {sign}{diff_abs:.2f} ₽
+<b>% изменения:</b> {sign}{diff_percent:.2f}%
 
 💡 {interpretation}
 
@@ -178,7 +173,7 @@ dp = Dispatcher(storage=MemoryStorage())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
-        f"👋 <b>Добро пожаловать!</b>\n\n{HELP_TEXT}",
+        f"{HELP_TEXT}",
         reply_markup=get_main_keyboard(),
         parse_mode="HTML"
     )
@@ -305,7 +300,7 @@ async def process_second_date(message: types.Message, state: FSMContext):
     first_rate = data["first_rate"]
     first_date_str = data["first_date_str"]
 
-    await message.answer("🔄 <i>Получаю курс с ЦБ РФ...</i>", parse_mode="HTML")
+    await message.answer("<i>Получаю курс с ЦБ РФ...</i>", parse_mode="HTML")
     rate_data = await fetch_usd_rate(second_date)
 
     if rate_data is None:
@@ -347,11 +342,11 @@ def run_flask():
 
 # ========== ЗАПУСК ==========
 async def main():
-    print("🚀 Бот запускается...")
+    print("Бот запускается...")
     try:
         await dp.start_polling(bot)
     except Exception as e:
-        print(f"❌ Ошибка при запуске бота: {e}")
+        print(f"Ошибка при запуске бота: {e}")
         raise
 
 if __name__ == "__main__":
