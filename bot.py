@@ -8,24 +8,12 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from flask import Flask
-import threading
 
 # ========== НАСТРОЙКИ ==========
+# Токен берется из переменной окружения BOT_TOKEN
 TOKEN = os.environ.get("BOT_TOKEN", "8696308891:AAHoPKGqjHRuPFBTI8d7sP9BvjalDPzBkqM")
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-
-# Flask app for Render (чтобы сервер не засыпал)
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def health_check():
-    return "Bot is running!"
-
-@flask_app.route('/health')
-def health():
-    return "OK"
 
 # ========== КНОПКИ ГЛАВНОГО МЕНЮ ==========
 menu_kb = ReplyKeyboardMarkup(
@@ -230,18 +218,10 @@ async def process_date2(message: Message, state: FSMContext):
     await message.answer(result_text, parse_mode="HTML", reply_markup=menu_kb)
     await state.clear()
 
-# ========== ЗАПУСК БОТА В ПОТОКЕ + FLASK ДЛЯ RENDER ==========
-def run_bot():
-    asyncio.run(dp.start_polling(bot))
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    flask_app.run(host="0.0.0.0", port=port)
+# ========== ЗАПУСК БОТА ==========
+async def main():
+    print("🤖 Бот успешно запущен и работает!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.start()
-    
-    # Запускаем Flask сервер (для Render)
-    run_flask()
+    asyncio.run(main())
