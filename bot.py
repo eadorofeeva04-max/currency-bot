@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime
+from xml.etree import ElementTree
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
@@ -20,8 +21,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     print("❌ НЕТ ТОКЕНА!")
     sys.exit(1)
-
-CBR_URL = "https://cbr.ru/currency_base/daily/"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,25 +53,37 @@ def get_back_keyboard():
     builder.add(KeyboardButton(text="🔙 Отмена"))
     return builder.as_markup(resize_keyboard=True)
 
-# ========== ПАРСИНГ КУРСОВ ==========
+# ========== КУРС ЦБ РФ (XML API) ==========
 async def fetch_cbr_usd_rate(date: datetime) -> float | None:
-    date_str = date.strftime("%d.%m.%Y")
-    url = f"{CBR_URL}?date_req={date_str}"
+    """Получает курс USD с официального XML API ЦБ РФ"""
+    date_str = date.strftime("%d/%m/%Y")
+    url = f"https://www.cbr.ru/scripts/XML_daily.asp?date_req={date_str}"
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10) as response:
                 if response.status != 200:
+                    logger.error(f"ЦБ API: HTTP {response.status}")
                     return None
-                html = await response.text()
-                match = re.search(r'<td>USD<td>\s*<td>1<td>\s*<td>Доллар США</td>\s*<td>([\d,]+)<td>', html, re.IGNORECASE | re.DOTALL)
-                if not match:
-                    return None
-                return float(match.group(1).replace(',', '.'))
+                
+                xml_text = await response.text()
+                root = ElementTree.fromstring(xml_text)
+                
+                for valute in root.findall(".//Valute"):
+                    if valute.get("ID") == "R01235":  # USD код
+                        value = valute.find("Value").text
+                        rate = float(value.replace(",", "."))
+                        logger.info(f"Курс ЦБ: {rate}")
+                        return rate
+                
+                logger.warning(f"USD не найден")
+                return None
+                
     except Exception as e:
-        logger.error(f"ЦБ ошибка: {e}")
+        logger.error(f"ЦБ API ошибка: {e}")
         return None
 
+# ========== КУРС RAPIRA (JSON API) ==========
 async def fetch_rapira_usdt_rate() -> float | None:
     """Получает курс USDT/RUB через официальное API Rapira"""
     url = "https://rapira.net/open/market/rates?pair=USDT_RUB"
@@ -98,16 +109,17 @@ async def fetch_rapira_usdt_rate() -> float | None:
                     if item.get('symbol') == 'USDT/RUB':
                         rate = item.get('close') or item.get('askPrice')
                         if rate:
-                            logger.info(f"Rapira API курс: {rate}")
+                            logger.info(f"Rapira курс: {rate}")
                             return float(rate)
                 
-                logger.warning("Rapira API: USDT/RUB не найден")
+                logger.warning("USDT/RUB не найден")
                 return None
                 
     except Exception as e:
-        logger.error(f"Rapira API ошибка: {e}")
+        logger.error(f"Rapira ошибка: {e}")
         return None
 
+# ========== ВСПОМОГАТЕЛЬНЫЕ ==========
 def parse_date(user_input: str) -> datetime | None:
     if user_input.lower() in ["сегодня", "today"]:
         return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -207,6 +219,8 @@ def run_flask():
 # ========== ЗАПУСК ==========
 async def main():
     print("🚀 Бот запущен!")
+    print("✅ Курс ЦБ: XML API")
+    print("✅ Курс Rapira: JSON API")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
