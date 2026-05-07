@@ -96,25 +96,43 @@ async def fetch_cbr_usd_rate(date: datetime) -> float | None:
         return None
 
 async def fetch_rapira_usdt_rate() -> float | None:
-    """
-    Получает текущий курс USDT/RUB с Rapira (публичный API).
-    Возвращает float или None.
-    """
+    """Парсит курс USDT/RUB с сайта rapira.net"""
+    url = "https://rapira.net/ru/exchange/USDT_RUB"
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(RAPIRA_API_URL, timeout=10) as resp:
-                if resp.status != 200:
-                    logger.error(f"Rapira: HTTP {resp.status}")
+            async with session.get(url, timeout=10, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }) as response:
+                if response.status != 200:
+                    logger.error(f"Rapira: HTTP {response.status}")
                     return None
-                data = await resp.json()
-                # Пример ответа: {"pair":"USDT_RUB","last":79.23,"high":...}
-                rate = data.get('last')
-                if rate and isinstance(rate, (int, float)):
-                    return float(rate)
-                logger.warning("Rapira: поле 'last' не найдено")
+
+                html = await response.text()
+
+                # ---- СПИСОК ВОЗМОЖНЫХ ПАТТЕРНОВ ДЛЯ ПОИСКА КУРСА ----
+                patterns = [
+                    r'"last":"?([\d.]+)"?',                 # JSON поле "last"
+                    r'"price":"?([\d.]+)"?',                # JSON поле "price"
+                    r'<span[^>]*class="[^"]*price[^"]*"[^>]*>([\d.]+)<', # <span class="...price...">
+                    r'<div[^>]*class="[^"]*rate[^"]*"[^>]*>([\d.]+)<',   # <div class="...rate...">
+                    r'USDT<\/span>\s*<span[^>]*>([\d.]+)<', # Табличный формат
+                    r'₽\s*([\d.]+)\s*</div>',               # Цена в рублях в div
+                    r'>([\d.]+)\s*₽<',                       # Цифры перед символом рубля
+                ]
+
+                for pattern in patterns:
+                    match = re.search(pattern, html)
+                    if match:
+                        rate = float(match.group(1))
+                        logger.info(f"Rapira курс найден: {rate} по паттерну {pattern}")
+                        return rate
+
+                logger.warning("Не удалось найти курс Rapira на странице")
                 return None
+
     except Exception as e:
-        logger.error(f"Rapira ошибка: {e}")
+        logger.error(f"Ошибка парсинга Rapira: {e}")
         return None
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
