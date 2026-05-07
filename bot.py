@@ -84,38 +84,59 @@ async def fetch_cbr_usd_rate(date: datetime) -> float | None:
 
 # ========== КУРС RAPIRA (ИСПРАВЛЕННЫЙ URL) ==========
 async def fetch_rapira_usdt_rate() -> float | None:
-    """Получает курс USDT/RUB через официальное API Rapira"""
-    # ПРАВИЛЬНЫЙ URL через apidog.io
-    url = "https://rapira.apidog.io/open/market/rates?pair=USDT_RUB"
-    
+    """
+    Получает курс USDT/RUB через официальное API Rapira.
+    """
+    # Используем подтверждённый и рабочий адрес API
+    url = "https://api.rapira.net/open/market/rates"
+
     try:
         async with aiohttp.ClientSession() as session:
+            # Отправляем GET-запрос, указываем, что ждём JSON
             async with session.get(
-                url, 
+                url,
                 timeout=10,
                 headers={'Accept': 'application/json'}
             ) as response:
+                # Проверяем, успешен ли HTTP-запрос
                 if response.status != 200:
-                    logger.error(f"Rapira API: HTTP {response.status}")
+                    logger.error(f"Rapira API: Ошибка HTTP {response.status}")
                     return None
-                
+
+                # Парсим JSON-ответ
                 data = await response.json()
-                
+
+                # Проверяем, что API вернул успешный код
                 if data.get('code') != 0:
-                    logger.error(f"Rapira API: ошибка {data.get('message')}")
+                    logger.error(f"Rapira API: Ошибка в ответе - {data.get('message')}")
                     return None
-                
+
+                # Ищем в массиве 'data' наш торговый символ 'USDT/RUB'
                 for item in data.get('data', []):
                     if item.get('symbol') == 'USDT/RUB':
-                        rate = item.get('close') or item.get('askPrice')
+                        # Берём курс из поля 'close' (оно всегда есть и точное)
+                        rate = item.get('close')
                         if rate:
-                            logger.info(f"Rapira курс: {rate}")
+                            logger.info(f"Rapira API: Успешно получен курс USDT/RUB = {rate}")
+                            # Возвращаем как число с плавающей точкой
                             return float(rate)
-                
+                        else:
+                            logger.warning("Rapira API: Поле 'close' найдено, но оно пустое.")
+                            return None
+
+                # Если символ не найден
+                logger.warning("Rapira API: Символ 'USDT/RUB' не найден в ответе.")
                 return None
-                
+
+    # Обрабатываем любые ошибки сети или тайм-аута
+    except asyncio.TimeoutError:
+        logger.error("Rapira API: Превышен таймаут ожидания ответа.")
+        return None
+    except aiohttp.ClientError as e:
+        logger.error(f"Rapira API: Ошибка сети - {e}")
+        return None
     except Exception as e:
-        logger.error(f"Rapira ошибка: {e}")
+        logger.error(f"Rapira API: Непредвиденная ошибка - {e}")
         return None
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ==========
