@@ -53,7 +53,7 @@ def get_back_keyboard():
     builder.add(KeyboardButton(text="🔙 Отмена"))
     return builder.as_markup(resize_keyboard=True)
 
-# ========== КУРС ЦБ РФ (XML API) ==========
+# ========== КУРС ЦБ РФ ==========
 async def fetch_cbr_usd_rate(date: datetime) -> float | None:
     """Получает курс USD с официального XML API ЦБ РФ"""
     date_str = date.strftime("%d/%m/%Y")
@@ -70,23 +70,23 @@ async def fetch_cbr_usd_rate(date: datetime) -> float | None:
                 root = ElementTree.fromstring(xml_text)
                 
                 for valute in root.findall(".//Valute"):
-                    if valute.get("ID") == "R01235":  # USD код
+                    if valute.get("ID") == "R01235":
                         value = valute.find("Value").text
                         rate = float(value.replace(",", "."))
                         logger.info(f"Курс ЦБ: {rate}")
                         return rate
                 
-                logger.warning(f"USD не найден")
                 return None
                 
     except Exception as e:
-        logger.error(f"ЦБ API ошибка: {e}")
+        logger.error(f"ЦБ ошибка: {e}")
         return None
 
-# ========== КУРС RAPIRA (JSON API) ==========
+# ========== КУРС RAPIRA (ИСПРАВЛЕННЫЙ URL) ==========
 async def fetch_rapira_usdt_rate() -> float | None:
     """Получает курс USDT/RUB через официальное API Rapira"""
-    url = "https://rapira.net/open/market/rates?pair=USDT_RUB"
+    # ПРАВИЛЬНЫЙ URL через apidog.io
+    url = "https://rapira.apidog.io/open/market/rates?pair=USDT_RUB"
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -112,7 +112,6 @@ async def fetch_rapira_usdt_rate() -> float | None:
                             logger.info(f"Rapira курс: {rate}")
                             return float(rate)
                 
-                logger.warning("USDT/RUB не найден")
                 return None
                 
     except Exception as e:
@@ -220,7 +219,7 @@ def run_flask():
 async def main():
     print("🚀 Бот запущен!")
     print("✅ Курс ЦБ: XML API")
-    print("✅ Курс Rapira: JSON API")
+    print("✅ Курс Rapira: JSON API (rapira.apidog.io)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
